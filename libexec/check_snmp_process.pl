@@ -1,49 +1,47 @@
 #!/usr/bin/perl -w
 ############################## check_snmp_process ##############
-# Version : 1.4
-# Date : March 12 2007
-# Author  : Patrick Proy (patrick at proy.org)
+my $Version='1.10';
+# Date : Oct 12 2007
+# Author  : Patrick Proy (patrick at proy dot org)
 # Help : http://nagios.manubulon.com
 # Licence : GPL - http://www.fsf.org/licenses/gpl.txt
-# Contrib : Makina Corpus
+# Contrib : Makina Corpus, adam At greekattic d0t com
 # TODO : put $o_delta as an option
-# Contrib : 
+# 	 If testing on localhost, selects itself....
 ###############################################################
 #
 # help : ./check_snmp_process -h
 
-############### BASE DIRECTORY FOR TEMP FILE ########
-my $o_base_dir="/tmp/tmp_Nagios_proc.";
-my $file_history=200;   # number of data to keep in files.
-my $delta_of_time_to_make_average=300;  # 5minutes by default
- 
 use strict;
 use Net::SNMP;
 use Getopt::Long;
 
-# Nagios specific
+############### BASE DIRECTORY FOR TEMP FILE ########
+my $o_base_dir="/tmp/tmp_Icinga_proc.";
+my $file_history=200;   # number of data to keep in files.
+my $delta_of_time_to_make_average=300;  # 5minutes by default
 
-use lib "/var/lib/shinken/libexec";
-use utils qw(%ERRORS $TIMEOUT);
-#my $TIMEOUT = 5;
-#my %ERRORS=('OK'=>0,'WARNING'=>1,'CRITICAL'=>2,'UNKNOWN'=>3,'DEPENDENT'=>4);
+# Icinga specific
+my $TIMEOUT = 15;
+my %ERRORS=('OK'=>0,'WARNING'=>1,'CRITICAL'=>2,'UNKNOWN'=>3,'DEPENDENT'=>4);
 
 # SNMP Datas
 my $process_table= '1.3.6.1.2.1.25.4.2.1';
 my $index_table = '1.3.6.1.2.1.25.4.2.1.1';
 my $run_name_table = '1.3.6.1.2.1.25.4.2.1.2';
 my $run_path_table = '1.3.6.1.2.1.25.4.2.1.4';
+my $run_param_table = '1.3.6.1.2.1.25.4.2.1.5';
 my $proc_mem_table = '1.3.6.1.2.1.25.5.1.1.2'; # Kbytes
 my $proc_cpu_table = '1.3.6.1.2.1.25.5.1.1.1'; # Centi sec of CPU
 my $proc_run_state = '1.3.6.1.2.1.25.4.2.1.7';
 
 # Globals
 
-my $Version='1.4';
 
 my $o_host = 	undef; 		# hostname 
 my $o_community =undef; 	# community 
 my $o_port = 	161; 		# port
+my $o_domain=   'udp/ipv4';	# Default to UDP over IPv4
 my $o_version2	= undef;	#use snmp v2c
 my $o_descr = 	undef; 		# description filter 
 my $o_warn = 	0; 		# warning limit 
@@ -57,6 +55,8 @@ my $o_noreg=	undef;		# Do not use Regexp for name
 my $o_path=	undef;		# check path instead of name
 my $o_inverse=	undef;		# checks max instead of min number of process
 my $o_get_all=	undef;		# get all tables at once
+my $o_param=	undef;		# Add process parameters for selection 
+my $o_perf=	undef;		# Add performance output
 my $o_timeout=  5;            	# Default 5s Timeout
 # SNMP V3 specific
 my $o_login=	undef;		# snmp v3 login
@@ -80,7 +80,7 @@ my $o_delta=	$delta_of_time_to_make_average;		# delta time for CPU check
 sub p_version { print "check_snmp_process version : $Version\n"; }
 
 sub print_usage {
-    print "Usage: $0 [-v] -H <host> -C <snmp_community> [-2] | (-l login -x passwd) [-p <port>] -n <name> [-w <min_proc>[,<max_proc>] -c <min_proc>[,max_proc] ] [-m<warn Mb>,<crit Mb> -a -u<warn %>,<crit%> ] [-t <timeout>] [-o <octet_length>] [-f ] [-r] [-V] [-g]\n";
+    print "Usage: $0 [-v] -H <host> -C <snmp_community> [-2] | (-l login -x passwd) [-p <port>] [-P <IP Protocol>] -n <name> [-w <min_proc>[,<max_proc>] -c <min_proc>[,max_proc] ] [-m<warn Mb>,<crit Mb> -a -u<warn %>,<crit%> -d<delta> ] [-t <timeout>] [-o <octet_length>] [-f -A -F ] [-r] [-V] [-g]\n";
 }
 
 sub isnotnum { # Return true if arg is not a number
@@ -166,6 +166,12 @@ sub help {
    <privproto> : Priv protocole (des|aes : default des) 
 -p, --port=PORT
    SNMP port (Default 161)
+-P, --protocol=PROTOCOL
+   Network protocol to be used
+   ['udp/ipv4'] : UDP over IPv4
+    'udp/ipv6'  : UDP over IPv6
+    'tcp/ipv4'  : TCP over IPv4
+    'tcp/ipv6'  : TCP over IPv6
 -n, --name=NAME
    Name of the process (regexp)
    No trailing slash !
@@ -174,6 +180,12 @@ sub help {
 -f, --fullpath
    Use full path name instead of process name 
    (Windows doesn't provide full path name)
+-A, --param
+   Add parameters to select processes.
+   ex : "named.*-t /var/named/chroot" will only select named process with this parameter 
+-F, --perfout
+   Add performance output
+   outputs : memory_usage, num_process, cpu_usage
 -w, --warn=MIN[,MAX]
    Number of process that will cause a warning 
    -1 for no warning, MAX must be >0. Ex : -w-1,50
@@ -193,6 +205,8 @@ Notes on warning and critical :
    checks cpu usage of all process
    values are warning and critical values in % of CPU usage
    if more than one CPU, value can be > 100% : 100%=1 CPU
+-d, --delta=seconds
+   make an average of <delta> seconds for CPU (default 300=5min)   
 -g, --getall
   In some cases, it is necessary to get all data at once because
   process die very frequently.
@@ -225,6 +239,7 @@ sub check_options {
         'h'     => \$o_help,    	'help'        	=> \$o_help,
         'H:s'   => \$o_host,		'hostname:s'	=> \$o_host,
         'p:i'   => \$o_port,   		'port:i'	=> \$o_port,
+	'P:s'	=> \$o_domain,		'protocol:s'	=> \$o_domain,
         'C:s'   => \$o_community,	'community:s'	=> \$o_community,
         'l:s'   => \$o_login,           'login:s'       => \$o_login,
         'x:s'   => \$o_passwd,          'passwd:s'      => \$o_passwd,
@@ -232,17 +247,20 @@ sub check_options {
 	'L:s'	=> \$v3protocols,		'protocols:s'	=> \$v3protocols,   
 	'c:s'   => \$o_crit,    	'critical:s'	=> \$o_crit,
         'w:s'   => \$o_warn,    	'warn:s'	=> \$o_warn,
-		't:i'   => \$o_timeout,       	'timeout:i'     => \$o_timeout,
+	't:i'   => \$o_timeout,       	'timeout:i'     => \$o_timeout,
         'n:s'   => \$o_descr,		'name:s'	=> \$o_descr,
         'r'     => \$o_noreg,           'noregexp'      => \$o_noreg,
         'f'     => \$o_path,           	'fullpath'      => \$o_path,
         'm:s'   => \$o_mem,           	'memory:s'    	=> \$o_mem,
         'a'     => \$o_mem_avg,       	'average'      	=> \$o_mem_avg,
         'u:s'   => \$o_cpu,       	'cpu'      	=> \$o_cpu,
-		'2'	=> \$o_version2,	'v2c'		=> \$o_version2,
-		'o:i'   => \$o_octetlength,    	'octetlength:i' => \$o_octetlength,
-		'g'   	=> \$o_get_all,       	'getall'      	=> \$o_get_all,
-		'V'     => \$o_version,         'version'       => \$o_version
+	'2'	=> \$o_version2,	'v2c'		=> \$o_version2,
+	'o:i'   => \$o_octetlength,    	'octetlength:i' => \$o_octetlength,
+	'g'   	=> \$o_get_all,       	'getall'      	=> \$o_get_all,
+	'A'     => \$o_param,         'param'       => \$o_param,
+	'F'     => \$o_perf,         'perfout'       => \$o_perf,
+        'd:i'   => \$o_delta,           'delta:i'       => \$o_delta,		
+	'V'     => \$o_version,         'version'       => \$o_version
     );
     if (defined ($o_help)) { help(); exit $ERRORS{"UNKNOWN"}};
     if (defined($o_version)) { p_version(); exit $ERRORS{"UNKNOWN"}};
@@ -332,6 +350,7 @@ if ( defined($o_login) && defined($o_passwd)) {
       -hostname   	=> $o_host,
       -version		=> '3',
       -port      	=> $o_port,
+      -domain           => $o_domain,
       -username		=> $o_login,
       -authpassword	=> $o_passwd,
       -authprotocol	=> $o_authproto,
@@ -344,6 +363,7 @@ if ( defined($o_login) && defined($o_passwd)) {
       -version		=> '3',
       -username		=> $o_login,
       -port      	=> $o_port,
+      -domain           => $o_domain,
       -authpassword	=> $o_passwd,
       -authprotocol	=> $o_authproto,
       -privpassword	=> $o_privpass,
@@ -359,6 +379,7 @@ if ( defined($o_login) && defined($o_passwd)) {
 	   -version   => 2,
        -community => $o_community,
        -port      => $o_port,
+      -domain           => $o_domain,
        -timeout   => $o_timeout
     );
   } else {
@@ -367,6 +388,7 @@ if ( defined($o_login) && defined($o_passwd)) {
        -hostname  => $o_host,
        -community => $o_community,
        -port      => $o_port,
+      -domain           => $o_domain,
        -timeout   => $o_timeout
     );
   }
@@ -396,11 +418,11 @@ my $resultat=undef;
 my %result_cons=();
 my ($getall_run,$getall_cpu,$getall_mem)=(undef,undef,undef);
 if ( !defined ($o_path) ) {
-  $resultat = (Net::SNMP->VERSION < 4) ? 
+  $resultat = (version->parse(Net::SNMP->VERSION) < 4) ? 
 		$session->get_table($run_name_table)
 		: $session->get_table(Baseoid => $run_name_table);
 } else {
-  $resultat = (Net::SNMP->VERSION < 4) ?
+  $resultat = (version->parse(Net::SNMP->VERSION) < 4) ?
 	$session->get_table($run_path_table)
 	:$session->get_table(Baseoid => $run_path_table);
 }
@@ -411,8 +433,21 @@ if (!defined($resultat)) {
    exit $ERRORS{"UNKNOWN"};
 }
 
+my $resultat_param=undef;
+if (defined($o_param)) { # Get parameter table too
+    $resultat_param = (version->parse(Net::SNMP->VERSION) < 4) ?
+        $session->get_table($run_param_table)
+        :$session->get_table(Baseoid => $run_param_table);
+   if (!defined($resultat_param)) {
+      printf("ERROR: Process param table : %s.\n", $session->error);
+      $session->close;
+      exit $ERRORS{"UNKNOWN"};
+   }
+   
+}
+
 if (defined ($o_get_all)) {
-  $getall_run = (Net::SNMP->VERSION < 4) ?
+  $getall_run = (version->parse(Net::SNMP->VERSION) < 4) ?
 	$session->get_table($proc_run_state )
 	:$session->get_table(Baseoid => $proc_run_state );
   if (!defined($getall_run)) {
@@ -423,7 +458,7 @@ if (defined ($o_get_all)) {
   foreach my $key ( keys %$getall_run) {
     $result_cons{$key}=$$getall_run{$key};
   } 
-  $getall_cpu = (Net::SNMP->VERSION < 4) ?
+  $getall_cpu = (version->parse(Net::SNMP->VERSION) < 4) ?
 	$session->get_table($proc_cpu_table)
 	: $session->get_table(Baseoid => $proc_cpu_table);
   if (!defined($getall_cpu)) {
@@ -434,7 +469,7 @@ if (defined ($o_get_all)) {
   foreach my $key ( keys %$getall_cpu) {
     $result_cons{$key}=$$getall_cpu{$key};
   } 
-  $getall_mem = (Net::SNMP->VERSION < 4) ? 
+  $getall_mem = (version->parse(Net::SNMP->VERSION) < 4) ? 
 	$session->get_table($proc_mem_table)
 	: $session->get_table(Baseoid => $proc_mem_table);
   if (!defined($getall_mem)) {
@@ -458,8 +493,14 @@ my $count_oid = 0;
 verb("Filter : $o_descr");
 
 foreach my $key ( keys %$resultat) {
-   verb("OID : $key, Desc : $$resultat{$key}");
    # test by regexp or exact match
+   # First add param if necessary
+   if (defined($o_param)){
+	my $pid = (split /\./,$key)[-1];
+	$pid = $run_param_table .".".$pid;
+        $$resultat{$key} .= " " . $$resultat_param{$pid};
+   }
+   verb("OID : $key, Desc : $$resultat{$key}");
    my $test = defined($o_noreg)
                 ? $$resultat{$key} eq $o_descr
                 : $$resultat{$key} =~ /$o_descr/;
@@ -509,7 +550,7 @@ if (!defined ($o_get_all)) {
 	 $toid[$i]=$oids[$i+$tmp_index];
 	 #verb("$i :  $toid[$i] : $oids[$i+$tmp_index]");
       }
-      $tmp_result = (Net::SNMP->VERSION < 4) ? 
+      $tmp_result = (version->parse(Net::SNMP->VERSION) < 4) ? 
 	    $session->get_request(@toid)
 		: $session->get_request(Varbindlist => \@toid);
       if (!defined($tmp_result)) { printf("ERROR: running table : %s.\n", $session->error); $session->close;
@@ -521,7 +562,7 @@ if (!defined ($o_get_all)) {
     }  
 
   } else {
-    $result = (Net::SNMP->VERSION < 4) ? 
+    $result = (version->parse(Net::SNMP->VERSION) < 4) ? 
 		$session->get_request(@oids)
 		: $session->get_request(Varbindlist => \@oids);
     if (!defined($result)) { printf("ERROR: running table : %s.\n", $session->error); $session->close;
@@ -545,6 +586,7 @@ for (my $i=0; $i< $num_int; $i++) {
 }
 
 my $final_status=0;
+my $perf_output;
 my ($res_memory,$res_cpu)=(0,0);
 my $memory_print="";
 my $cpu_print="";
@@ -571,6 +613,9 @@ if (defined ($o_mem) ) {
  } else {
    $memory_print=", Mem : ".sprintf("%.1f",$res_memory)."Mb OK";
  }
+ if (defined($o_perf)) {
+	$perf_output= "'memory_usage'=".sprintf("%.1f",$res_memory) ."MB;".$o_memL[0].";".$o_memL[1];
+ }
 }
 
 ######## Checks CPU usage
@@ -594,6 +639,10 @@ if (defined ($o_cpu) ) {
   #### Read file
   $temp_file_name=$o_descr;
   $temp_file_name =~ s/ /_/g;
+  $temp_file_name =~ s/\//_/g;
+  $temp_file_name =~ s/-//g;
+  $temp_file_name =~ s/=//g;
+  $temp_file_name = substr($temp_file_name,0,40);
   $temp_file_name = $o_base_dir . $o_host ."." . $temp_file_name; 
   # First, read entire file
   my @ret_array=read_file($temp_file_name,$n_items_check);
@@ -609,6 +658,10 @@ if (defined ($o_cpu) ) {
         if ($file_values[$j][0] > $trigger_low) {
           # found value = centiseconds / seconds = %cpu
           $found_value= ($res_cpu-$file_values[$j][1]) / ($timenow - $file_values[$j][0] );
+	  if ($found_value <0) { # in case of program restart
+		$j=0;$found_value=undef; # don't look for more values
+		$n_rows=0; # reset file
+	  }
         }
       }
       $j--;
@@ -631,6 +684,10 @@ if (defined ($o_cpu) ) {
     } else {
       $cpu_print.=", Cpu : ".sprintf("%.0f",$found_value)."% OK";
     }
+	if (defined($o_perf)) {
+		if (!defined($perf_output)) {$perf_output="";} else {$perf_output.=" ";}
+		$perf_output.= "'cpu_usage'=". sprintf("%.0f",$found_value)."%;".$o_cpuL[0].";".$o_cpuL[1];
+	}
   } else {
     if ($final_status==0) { $final_status=3 };
     $cpu_print.=", No data for CPU (".$n_rows." line(s)):UNKNOWN";
@@ -659,7 +716,14 @@ if (defined($o_critL[1]) && ($num_int_ok > $o_critL[1])) {
    print " (<= ",$o_warnL[1],"):OK";
 }
 
-print $memory_print,$cpu_print,"\n";
+print $memory_print,$cpu_print;
+
+if (defined($o_perf)) {
+	if (!defined($perf_output)) {$perf_output="";} else {$perf_output.=" ";}
+	$perf_output.= "'num_process'=". $num_int_ok.";".$o_warnL[0].";".$o_critL[0];
+	print " | ",$perf_output;
+}
+print "\n";
 
 if ($final_status==2) { exit $ERRORS{"CRITICAL"};}
 if ($final_status==1) { exit $ERRORS{"WARNING"};}
